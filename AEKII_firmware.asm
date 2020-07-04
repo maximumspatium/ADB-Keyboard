@@ -248,7 +248,7 @@ L00B3:
     jmp     L0102       ; go to event processing
 
 ; -------------------------------------------------------------------------
-; Read status for alphanumeric keys (L00BB)
+; Read status for alphanumeric keys (L00BB) and store it in rb0.R4
 ; rb0.R2 contains column number (0...F)
 ; -------------------------------------------------------------------------
 ReadKeys:
@@ -267,7 +267,193 @@ L00C3:
 
 L00C7:
     ins     a,bus       ; read keys again
-    xrl     a,r4        ; state changes?
+    xrl     a,r4        ; state changed?
     jnz     L00C3       ; --> re-read and retry
     djnz    r1,L00C7    ; otherwise, continue checking
     ret
+
+; -------------------------------------------------------------------------
+; Lookup table for converting key position (column/row) to scan code.
+; Organized as 18 columns, 8 keys each.
+; -------------------------------------------------------------------------
+    org     00370H
+
+    ; scan codes when in the standard keyboard mode (device handler ID 2)
+    db      037H        ; left/right command
+    db      03AH        ; left option
+    db      038H        ; left shift
+    db      036H        ; left control
+    db      07FH        ; Power Switch
+    db      039H        ; caps lock
+    db      038H        ; right shift
+    db      036H        ; right control
+
+    ; scan codes when in the extended keyboard mode (device handler ID 3)
+    db      037H        ; left/right command
+    db      03AH        ; left option
+    db      038H        ; left shift
+    db      036H        ; left control
+    db      07FH        ; Power Switch
+    db      039H        ; caps lock
+    db      07BH        ; right shift
+    db      07DH        ; right control
+
+    ; column 0
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      04CH        ; Keypad ENTER
+    db      055H        ; Keypad "3"
+    db      04EH        ; Keypad "-"
+    db      043H        ; Keypad "*"
+    db      04BH        ; Keypad "/"
+    db      05CH        ; Keypad "9"
+
+    ; column 1
+    db      041H        ; Keypad "."
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      03CH        ; right arrow
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      051H        ; Keypad "="
+    db      047H        ; Numlock/Clear
+
+    ; column 2
+    db      0FFH        ; unassigned
+    db      045H        ; Keypad "+"
+    db      056H        ; Keypad "4"
+    db      057H        ; Keypad "5"
+    db      058H        ; Keypad "6"
+    db      059H        ; Keypad "7"
+    db      05BH        ; Keypad "8"
+    db      0FFH        ; unassigned
+
+    ; column 3
+    db      03DH        ; arrow down
+    db      03BH        ; left arrow
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      071H        ; F15/Pause
+    db      06BH        ; F14/Scroll Lock
+
+    ; column 4
+    db      054H        ; Keypad "2"
+    db      0FFH        ; unassigned
+    db      03EH        ; arrow up
+    db      075H        ; del
+    db      077H        ; end
+    db      079H        ; Page Down
+    db      074H        ; Page Up
+    db      069H        ; F13/Print Screen
+
+    ; column 5
+    db      053H        ; Keypad "1"
+    db      02FH        ; "."
+    db      024H        ; return
+    db      072H        ; help/ins
+    db      073H        ; home
+    db      02AH        ; \|
+    db      033H        ; Delete
+    db      06FH        ; F12
+
+    ; column 6
+    db      052H        ; Keypad "0"
+    db      02CH        ; /?
+    db      027H        ; "'
+    db      01EH        ; ]}
+    db      021H        ; [{
+    db      018H        ; =+
+    db      067H        ; F11
+    db      06DH        ; F10
+
+    ; column 7
+    db      02EH        ; M
+    db      02BH        ; ,<
+    db      029H        ; ;:
+    db      023H        ; P
+    db      01BH        ; -_
+    db      01FH        ; O
+    db      01DH        ; 0)
+    db      065H        ; F9
+
+    ; column 8
+    db      02DH        ; N
+    db      026H        ; J
+    db      025H        ; L
+    db      028H        ; K
+    db      0FFH        ; unassigned
+    db      019H        ; 9(
+    db      064H        ; F8
+    db      062H        ; F7
+
+    ; column 9
+    db      0FFH        ; unassigned
+    db      004H        ; H
+    db      0FFH        ; unassigned
+    db      022H        ; I
+    db      0FFH        ; unassigned
+    db      01CH        ; 8*
+    db      01AH        ; 7&
+    db      061H        ; F6
+
+    ; column 10
+    db      031H        ; Space
+    db      00BH        ; B
+    db      020H        ; U
+    db      0FFH        ; unassigned
+    db      010H        ; Y
+    db      011H        ; T
+    db      016H        ; 6^
+    db      060H        ; F5
+
+    ; column 11
+    db      009H        ; V
+    db      003H        ; F
+    db      0FFH        ; unassigned
+    db      00FH        ; R
+    db      005H        ; G
+    db      017H        ; 5%
+    db      015H        ; 4$
+    db      076H        ; F4
+
+    ; column 12
+    db      008H        ; C
+    db      0FFH        ; unassigned
+    db      002H        ; D
+    db      00EH        ; E
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      014H        ; 3#
+    db      063H        ; F3
+
+    ; column 13
+    db      007H        ; X
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      00DH        ; W
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      013H        ; 2@
+    db      078H        ; F2
+
+    ; column 14
+    db      006H        ; Z
+    db      001H        ; S
+    db      0FFH        ; unassigned
+    db      00CH        ; Q
+    db      0FFH        ; unassigned
+    db      0FFH        ; unassigned
+    db      012H        ; 1!
+    db      07AH        ; F1
+
+    ; column 15
+    db      0FFH        ; unassigned
+    db      000H        ; A
+    db      0FFH        ; unassigned
+    db      030H        ; tab
+    db      0FFH        ; unassigned
+    db      00AH        ; ??????????
+    db      032H        ; `~
+    db      035H        ; esc
