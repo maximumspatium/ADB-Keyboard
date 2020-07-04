@@ -67,8 +67,8 @@ L001B:
 ResetDevice:
     sel     rb1         ; select register bank 1
 
-    mov     r6,#022H    ; upper nibble = device address = 2 (keyboard)
-                        ; lower nibble = device control bits, bit 1: SRQ enable
+    mov     r6,#022H    ; lower nibble = device address = 2 (keyboard)
+                        ; upper nibble = device control bits, bit 5: SRQ enable
 
     jni     L0027       ; is INT line pulled low?
     mov     r5,#002H    ; set device handler ID = 2 (standard keyboard)
@@ -129,7 +129,7 @@ MainLoop:
     mov     a,t         ; a non-zero value of the counter means that there was
     jnz     L005B       ; a transition from high to low on the T1 pin,
                         ; proceed with next iteration then
-    jmp     L0413       ; otherwise, go process ADB event
+    jmp     ProcessADB  ; otherwise, go process ADB event
 
 L0059:
     clr     f1          ; F1 will be set
@@ -454,6 +454,118 @@ L00C7:
     db      0FFH        ; unassigned
     db      030H        ; tab
     db      0FFH        ; unassigned
-    db      00AH        ; ??????????
+    db      00AH        ; <> (French and German keyboards)
     db      032H        ; `~
     db      035H        ; esc
+
+; -------------------------------------------------------------------------
+; Jump table for handling ADB commands.
+; Each byte contains an offset within page 4 to the corresponding handler.
+; -------------------------------------------------------------------------
+    org     00400H
+
+    db      020H        ; Send Reset,      jumps to L0420
+    db      059H        ; Flush,           jumps to 0x459
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      039H        ; invalid command, jumps to 0x439
+    db      0FBH        ; Listen reg 2,    jumps to 0x4FB
+    db      057H        ; Listen Reg 3,    jumps to 0x457
+    db      05FH        ; Talk register 0, jumps to 0x45F
+    db      039H        ; invalid command, jumps to 0x439
+    db      0A0H        ; Talk register 2, jumps to 0x4A0
+    db      0DFH        ; Talk register 3, jumps to 0x4DF
+
+; -------------------------------------------------------------------------
+; Process incoming ADB messages (L0413).
+; -------------------------------------------------------------------------
+    org     00413H
+
+ProcessADB:
+    sel     rb1         ; select register bank 1
+    mov     r1,#052H    ; loop counter
+
+    ; the following busy waiting loop waits for the Attention
+    ; signal to go from low to high within 820 µs.
+    ; each instruction cycle takes 2.5 µs on 8048/8049
+    ; jt1 and djnz require two cycles so 2.5 * 2 = 5 µs
+    ; one iteration will take 10 µs, 82 * 10 = 820 µs in total
+L0416:
+    jt1     L0423       ; exit the loop if T1 is high
+    djnz    r1,L0416    ; otherwise, keep waiting
+
+    mov     r1,#088H    ; another busy waiting loop (136 * 10 = 1360 µs)
+L041C:
+    jt1     L0423       ; exit the loop if T1 is high
+    djnz    r1,L041C    ; otherwise, keep waiting
+
+    ; if we got here, the T1 line is still low and we're already waiting
+    ; for 830 + 1360 = 2190 µs. The only ADB signal that is permitted
+    ; to stay low for that long is ADB Reset.
+L0420:
+    nop
+    jmp     ResetDevice
+
+L0423:
+    clr     f0          ; F0 = SRQ allowed = False
+    mov     a,r6        ;
+    swap    a           ; R3:upper nibble = my device address
+    mov     r3,a        ; R3:lower nibble = my flags, bit 1: SRQ enable
+
+    anl     a,r7        ; A = SRQ enable (R3:bit 1) & pending data (R7:bit 1)
+    cpl     a           ; the device is allowed to generate SRQ
+    jb1     L042C       ; if SRQ enable = 1 and there is data to send
+    cpl     f0          ; SRQ allowed = True
+
+L042C:
+    mov     r1,#009H    ; number of bits in the 1st ADB byte (including Sync)
+    mov     r0,#001H    ; number of bytes to receive
+    call    L0623       ; receive ADB Command byte to A
+    xrl     a,r3        ; process the received command if device address
+    anl     a,#0F0H     ; in the upper nibble of the command byte matches
+    jz      HandleCmd   ; our address
+    jf0     GenSRQ      ; go generate SRQ if SRQ allowed is true
+    jmp     MainLoop    ; otherwise, return to the main loop
+
+; -------------------------------------------------------------------------
+; Generate service request (SRQ).
+; This is accomplished by extending the low portion of the command stop bit
+; by 140 µs.
+; -------------------------------------------------------------------------
+GenSRQ:
+    orl     p1,#080H    ; pull ADB out low (inverse logic)
+    mov     r1,#01CH    ; loop counter (28 * 2 = 56 cycles * 2.5 µs = 140 µs)
+
+L043F:
+    djnz    r1,L043F    ; busy waiting while holding the bus low
+    anl     p1,#07FH    ; release the bus
+    jmp     MainLoop
+
+; -------------------------------------------------------------------------
+; Proceed with handling the requested ADB Command.
+; -------------------------------------------------------------------------
+HandleCmd:
+    mov     a,r7        ;
+    orl     a,#080H     ; set bit 7 in rb1.R7 -> enable keyboard scanning
+    mov     r7,a        ;
+
+    ; busy waiting for ADB line to go from low to high within 350 µs
+    ; (Stop-bit-to-start-bit time aka Tlt). That's because another
+    ; device may generate SRQ.
+    mov     r1,#023H    ; loop counter (35 * 4 = 140 cycles * 2.5 µs = 350 µs)
+L044B:
+    jt1     DispatchCmd ; exit the loop if T1 is high
+    djnz    r1,L044B    ; otherwise, keep waiting
+    jmp     MainLoop    ; start bit timeout, return to main loop
+
+DispatchCmd:
+    clr     a           ;
+    mov     t,a         ; reset timer/counter (2 cycles)
+    mov     a,r3        ; grab the lower nibble of the received ADB command
+    anl     a,#00FH     ; (command + register)
+    jmpp    @a          ; dispatch to the corresponding handler via table @ 0x400
