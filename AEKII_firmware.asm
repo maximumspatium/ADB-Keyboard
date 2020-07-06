@@ -143,7 +143,8 @@ L005B:
     mov     a,r7        ; is bit 7 of rb1.R7 set?
     sel     rb0         ;
     jb7     L0065       ; proceed with keyboard scanning if it's set
-    inc     r7          ; otherwise, increment rb0.R7 (idle counter?)
+    inc     r7          ; otherwise, increment rb0.R7 used for random
+                        ; address generation (see ADB Talk reg 3 command)
 
 L0063:
     jmp     MainLoop
@@ -465,21 +466,21 @@ L00C7:
     org     00400H
 
     db      020H        ; Send Reset,      jumps to L0420
-    db      059H        ; Flush,           jumps to 0x459
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      039H        ; invalid command, jumps to 0x439
-    db      0FBH        ; Listen reg 2,    jumps to 0x4FB
-    db      057H        ; Listen Reg 3,    jumps to 0x457
-    db      05FH        ; Talk register 0, jumps to 0x45F
-    db      039H        ; invalid command, jumps to 0x439
-    db      0A0H        ; Talk register 2, jumps to 0x4A0
-    db      0DFH        ; Talk register 3, jumps to 0x4DF
+    db      059H        ; Flush,           jumps to L0459
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      039H        ; invalid command, jumps to L0439
+    db      0FBH        ; Listen reg 2,    jumps to L04FB
+    db      057H        ; Listen Reg 3,    jumps to L0457
+    db      05FH        ; Talk register 0, jumps to L045F
+    db      039H        ; invalid command, jumps to L0439
+    db      0A0H        ; Talk register 2, jumps to L04A0
+    db      0DFH        ; Talk register 3, jumps to L04DF
 
 ; -------------------------------------------------------------------------
 ; Process incoming ADB messages (L0413).
@@ -525,11 +526,13 @@ L0423:
 L042C:
     mov     r1,#009H    ; number of bits in the 1st ADB byte (including Sync)
     mov     r0,#001H    ; number of bytes to receive
-    call    L0623       ; receive ADB Command byte to A
+    call    ADBRcv1     ; receive ADB Command byte to A
     xrl     a,r3        ; process the received command if device address
     anl     a,#0F0H     ; in the upper nibble of the command byte matches
     jz      HandleCmd   ; our address
     jf0     GenSRQ      ; go generate SRQ if SRQ allowed is true
+
+L0439:
     jmp     MainLoop    ; otherwise, return to the main loop
 
 ; -------------------------------------------------------------------------
@@ -569,3 +572,536 @@ DispatchCmd:
     mov     a,r3        ; grab the lower nibble of the received ADB command
     anl     a,#00FH     ; (command + register)
     jmpp    @a          ; dispatch to the corresponding handler via table @ 0x400
+
+; -------------------------------------------------------------------------
+; Jump to the handler for Listen Reg 3 command.
+; -------------------------------------------------------------------------
+L0457:
+    jmp     L051D       ; perform cross-segment jump
+
+; -------------------------------------------------------------------------
+; Handler for ADB Flush command.
+; -------------------------------------------------------------------------
+L0459:
+    mov     a,r7
+    anl     a,#0F5H
+    mov     r7,a
+    jmp     FlushEvents
+
+; -------------------------------------------------------------------------
+; Handler for ADB Talk Reg 0 command.
+; -------------------------------------------------------------------------
+L045F:
+    mov     a,r7
+    cpl     a
+    jb1     L049E
+    cpl     a
+    anl     a,#0FEH
+    mov     r7,a
+    mov     r3,#0FFH
+    mov     r0,#02AH
+    mov     a,@r0
+    mov     r0,a
+    mov     a,@r0
+    mov     r4,a
+    xrl     a,#07FH
+    anl     a,#07FH
+    jnz     L047C
+    mov     a,@r0
+    orl     a,#07FH
+    mov     r4,a
+    mov     r3,a
+    jmp     L0490
+
+L047C:
+    inc     r0
+    mov     r1,#029H
+    mov     a,@r1
+    xrl     a,r0
+    jz      L0490
+    mov     a,@r0
+    xrl     a,#07FH
+    anl     a,#07FH
+    jz      L0490
+    mov     a,@r0
+    mov     r3,a
+    mov     a,r7
+    orl     a,#001H
+    mov     r7,a
+
+L0490:
+    mov     r1,#006H
+    call    ADBXmit
+    mov     r0,#02AH
+    mov     a,r7
+    cpl     a
+    jb0     L049B
+    inc     @r0
+
+L049B:
+    inc     @r0
+    call    L0787
+
+L049E:
+    jmp     MainLoop
+
+; -------------------------------------------------------------------------
+; Handler for ADB Talk Reg 2 command.
+;
+; Implementation note: the device reads the statuses of the modifier
+; keys and LEDs directly without consulting the events cache.
+; -------------------------------------------------------------------------
+L04A0:
+    anl     p1,#0F0H    ; keep LED state and ADB out bits unchanged
+    orl     p1,#001H    ; select column 1 using the lower nibble of the port 1
+    ins     a,bus       ; read keys status for column 1
+    anl     a,#080H     ; keep only Numlock/Clear status
+    mov     r3,a        ; and put it into rb1.R3
+
+    anl     p1,#0F0H    ; keep LED state and ADB out bits unchanged
+    orl     p1,#003H    ; select column 3 using the lower nibble of the port 1
+    ins     a,bus       ; read keys status for column 3
+    rr      a           ;
+    anl     a,#040H     ; isolate F14/Scroll Lock status bit
+    orl     a,r3        ; and shift it into the bit position 6 of rb1.R3
+    mov     r3,a        ;
+
+    in      a,p1        ; read Port 1 status
+    cpl     a           ; invert all its bits
+    anl     a,#070H     ; isolate the LED status bits
+    swap    a           ; and place them into bits 0-2 of rb1.R3
+    orl     a,r3        ;
+
+    orl     a,#038H     ; set unused bits of rb1.R3 (reg 2 LSB) to 1
+    mov     r3,a        ;
+
+    in      a,p2        ;
+    jb7     L04C0       ;
+    anl     a,#0F7H     ; clear bit 11 of reg 2 if right control is pressed
+
+L04C0:
+    orl     a,#080H     ; set bit 15 of reg 2 to 1
+    jb6     L04C6       ;
+    anl     a,#0BBH     ; clear bit 10 of reg 2 if right shift is pressed
+
+L04C6:
+    jt0     L04CA       ;
+    anl     a,#0BDH     ; clear bit 9 of reg 2 if right option is pressed
+
+L04CA:
+    anl     a,#0BFH     ; clear bit 14 (Delete key status) of reg 2
+    mov     r4,a        ;
+    anl     p1,#0F0H    ; keep LED state and ADB out bits unchanged
+    orl     p1,#005H    ; select column 5 using the lower nibble of the port 1
+    ins     a,bus       ; read keys status for column 5
+    cpl     a           ;
+    jb6     L04D9       ; branch if Delete key is pressed
+    mov     a,r4        ;
+    orl     a,#040H     ; otherwise, set bit 14 of reg 2 (= Delete released)
+    mov     r4,a        ;
+
+L04D9:
+    mov     r1,#002H    ; delay = 2 * 2 = 4 * 2.5 µs = 10 µs
+    call    ADBXmit     ; send two bytes R4(MSB)/R3(LSB) to host over ADB
+    jmp     MainLoop
+
+; -----------------------------------------------------------------------------
+; Handler for ADB Talk Reg 3 command.
+;
+; Important implementation detail not mentioned in the Apple ADB documentation:
+; the device sends a random address in the bits 8-11 instead of its default
+; address.
+; This is a part of the ADB address conflict resolution process.
+; For a detailed description please refer to Microchip Application Note AN591,
+; "How Address Conflicts are Resolved".
+;
+; rb1.R6 - contains the MSB of the register 3 (bits 8-15)
+; rb1.R5 - contains the LSB of the register 3 (bits 0-7)
+; -----------------------------------------------------------------------------
+L04DF:
+    mov     a,r6        ;
+    anl     a,#0F0H     ; put the upper nibble of the device reg 3 (MSB)
+    mov     r4,a        ; into rb1.R4 (exceptional event bit, SRQ enable)
+    sel     rb0         ;
+    mov     a,r7        ; generate a random byte as follows:
+    rl      a           ; rb0.R7 <<= 1
+    mov     r7,a        ; (rb0.R7 will be incremented in the main loop)
+    sel     rb1         ;
+    anl     a,#00FH     ;
+    orl     a,r4        ;
+    mov     r4,a        ; put a random address into the lower nibble of rb1.R4
+    in      a,p2        ; read modifier keys status
+    anl     a,#010H     ; keep only the Power Switch bit (active low)
+    rl      a           ;
+    rl      a           ; shift it in the bit position 6
+    orl     a,r4        ; put Power Switch state into the Exceptional event bit
+    mov     r4,a        ; (bit 14 of register 3)
+    mov     a,r5        ;
+    mov     r3,a        ; rb1.R3 = current device handler ID
+    mov     r1,#008H    ; delay => 8 * 2 = 16 * 2.5 µs = 40 µs
+    call    ADBXmit     ; send two bytes R4(MSB)/R3(LSB) to host over ADB
+    jmp     MainLoop
+
+; -------------------------------------------------------------------------
+; Handler for ADB Listen Reg 2 command.
+;
+; Updates only LEDs status bits.
+; -------------------------------------------------------------------------
+L04FB:
+    jmp     L0500       ; cross-segment jump
+
+    org     00500H
+
+L0500:
+    clr     a           ;
+    mov     r3,a        ; clear reg2 MSB
+
+    ; busy waiting for ADB data line to go from high to low within 260 µs
+    mov     r1,#01AH    ; loop counter = 26 * 4 = 104 cycles * 2.5 µs = 260 µs
+L0504:
+    jnt1    L050A       ; exit the loop if T1 is low
+    djnz    r1,L0504    ; otherwise, keep waiting
+    jmp     MainLoop    ; start bit timeout reached, return to main loop
+
+L050A:
+    mov     r1,#009H    ; number of bits in the 1st ADB byte (including Sync)
+    mov     r0,#002H    ; number of bytes to receive
+    call    ADBRcv      ; receive two bytes from host
+    mov     a,r3        ; get the LSB of the received reg2 value
+    swap    a           ;
+    cpl     a           ; extract the LEDs status bits (lower nibble)
+    anl     a,#070H     ; and move them to the upper nibble
+    mov     r2,a        ; of rb1.R2
+    in      a,p1        ; read Port 1 status
+    anl     a,#08FH     ; keep all bits expect LEDs bits unchanged
+    orl     a,r2        ; add new LEDs status bits
+    outl    p1,a        ; update Port 1
+    jmp     MainLoop
+
+; -------------------------------------------------------------------------
+; Handler for ADB Listen Reg 3 command.
+; -------------------------------------------------------------------------
+L051D:
+    clr     a           ;
+    mov     r4,a        ; clear rb1.R3 and rb1.R4 that will hold
+    mov     r3,a        ; ADB bytes received from host
+
+    ; busy waiting for ADB data line to go from high to low within 260 µs
+    mov     r1,#01AH    ; loop counter = 26 * 4 = 104 cycles * 2.5 µs = 260 µs
+L0522:
+    jnt1    L0529       ; exit the loop if T1 is low
+    djnz    r1,L0522    ; otherwise, keep waiting
+    jmp     MainLoop    ; start bit timeout reached, return to main loop
+    nop
+
+L0529:
+    mov     r1,#009H    ; number of bits in the 1st ADB byte (including Sync)
+    mov     r0,#002H    ; number of bytes to receive
+    call    ADBRcv      ; receive two bytes from host
+    mov     r4,a        ; rb1.R4 contains the MSB of the received value
+
+    mov     a,r3        ; rb1.R3 contains the LSB of the received value
+    jnz     L0539       ; --> new device handler ID, branch if it's non-zero
+    mov     a,r4        ; otherwise, copy the MSB value into rb1.R6
+    anl     a,#02FH     ; that contains new device address and SRQ enable flag
+    mov     r6,a        ;
+
+L0537:
+    jmp     MainLoop    ; done
+
+L0539:
+    xrl     a,#0FFH     ; if device handler ID = 0xFF (Self-Test mode)
+    jnz     L053F       ;
+    jmp     L0459       ; go and flush internal event cache (equivalent to ADB Flush)
+
+L053F:
+    xrl     a,#002H     ;
+    jnz     L0550       ; branch if device handler ID ≠ 0xFD
+    in      a,p2        ; check for activator key --> left/right command
+    jb0     L0537       ; done if the activator key isn't pressed
+
+    ; perform address change if device activator key is pressed
+L0546:
+    mov     a,r4        ; grab new device address from rb1.R4
+    anl     a,#00FH     ;
+    xch     a,r6        ; and put it into the lower nibble of rb1.R6
+    anl     a,#020H     ; grab new SRQ enable bit value
+    orl     a,r6        ; and put it into bit 5 of rb1.R6
+    mov     r6,a        ;
+    jmp     MainLoop
+
+    ; perform address change if no collision detected
+L0550:
+    xrl     a,#003H     ;
+    jnz     L0559       ; branch if device handler ID ≠ 0xFE
+    mov     a,r7        ; otherwise, check the "collision" bit (rb1.R7:2)
+    jb2     L0537       ; if there was a collision, we're done
+    jmp     L0546       ; otherwise, go and accept new device address
+
+L0559:
+    mov     a,r3        ;
+    xrl     a,#003H     ;
+    jz      L0568       ; branch if device handler ID = 3
+    mov     a,r3        ;
+    xrl     a,#002H     ;
+    jz      L0568       ; branch if device handler ID = 2
+    mov     a,r3        ;
+    xrl     a,#005H     ;
+    jnz     L0537       ; if device handler ID ≠ 5, ignore the unknown ID value
+
+L0568:
+    mov     a,r3        ;
+    mov     r5,a        ; store new device handler ID in rb1.R5
+    jmp     MainLoop
+
+; -------------------------------------------------------------------------
+; Transmit a 16bit value over the ADB bus.
+; rb1.R4 contains the MSB, rb1.R3 the LSB of that value.
+; The MSB will be sent first followed by the LSB.
+; rb1.R1 contains the amount of an additional delay (n * 5 µs)
+; before starting the transaction.
+; The routine will continually check for ADB idle signal (T1 high)
+; and abort immediatedly with collision bit set if the ADB line goes low
+; unexpectedly.
+; -------------------------------------------------------------------------
+ADBXmit:
+    mov     a,r7        ;
+    orl     a,#004H     ; set the "collision" bit in rb1.R7
+    mov     r7,a        ;
+
+    mov     r0,#008H    ; bits counter
+
+L0572:
+    djnz    r1,L0572    ; perfom the requested delay (n * 5 µs)
+
+    mov     a,t         ; a non-zero value of the timer/counter means that
+    jnz     AbortXmit   ; another device has pulled the line low -> abort
+                        ; transaction with collision bit set
+
+    ; send ADB data start bit (35 µs low + 65 µs high)
+    orl     p1,#080H    ; pull the ADB line low
+    clr     a           ;
+    mov     t,a         ; reset ADB line pulses counter
+    call    Delay3      ;
+    anl     p1,#07FH    ; release the ADB line
+    nop                 ;
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    call    Delay2      ;
+
+L0584:
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    call    Delay5      ;
+    mov     a,t         ; "unauthorized" transition from high to low occured?
+    jnz     AbortXmit   ; --> abort with collision bit set
+    orl     p1,#080H    ; pull the ADB line low
+    clr     a           ;
+    mov     t,a         ; reset ADB line pulses counter
+    call    Delay5      ;
+    mov     a,r4        ;
+    rl      a           ;
+    mov     r4,a        ;
+    jb0     L05CA       ; branch if the next bit to send is a "1" bit
+    call    Delay1      ;
+    anl     p1,#07FH    ; release the ADB line
+
+L059A:
+    djnz    r0,L0584    ; go transmit next bit
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    mov     r0,#008H    ; otherwise, re-init the bits counter
+    jmp     L05A6       ; go send the LSB
+
+L05A2:
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    call    Delay6      ;
+
+L05A6:
+    nop                 ;
+    mov     a,t         ; "unauthorized" transition from high to low occured?
+    jnz     AbortXmit   ; --> abort with collision bit set
+    orl     p1,#080H    ; pull the ADB line low
+    clr     a           ;
+    mov     t,a         ; reset ADB line pulses counter
+    call    Delay5      ;
+    mov     a,r3        ;
+    rl      a           ;
+    mov     r3,a        ;
+    jb0     L05D3       ; branch if the next bit to send is a "1" bit
+    call    Delay1      ;
+    anl     p1,#07FH    ; release the ADB line
+
+L05B9:
+    djnz    r0,L05A2    ; go transmit next bit
+    call    Delay3      ;
+
+    ; generate ADB data stop bit (65 µs low + 35 µs high)
+    orl     p1,#080H    ; pull the ADB line low
+    call    Delay1      ;
+    call    Delay1      ; wait for 60 µs
+    anl     p1,#07FH    ; then release the ADB line
+
+    mov     a,r7        ; everything went well
+    anl     a,#0FBH     ; --> clear the "collision" bit
+    mov     r7,a        ;
+    ret
+
+    ; "1" bit path for MSB send
+L05CA:
+    anl     p1,#07FH    ; release the ADB line
+    nop                 ;
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    call    Delay4      ;
+    jmp     L059A       ; go send next bit
+
+    ; "1" bit path for LSB send
+L05D3:
+    anl     p1,#07FH    ; release the ADB line
+    nop                 ;
+    jnt1    AbortXmit   ; ADB line low? --> abort with collision bit set
+    call    Delay4      ;
+    jmp     L05B9       ; go send next bit
+
+AbortXmit:
+    clr     a           ;
+    mov     psw,a       ; clear program stack
+    jmp     MainLoop    ; return to main loop
+
+Delay1: ; delay for 30 µs
+    nop
+Delay2: ; delay for 27.5 µs
+    nop
+Delay3: ; delay for 25 µs
+    nop
+    nop
+    nop
+Delay4: ; delay for 17.5 µs
+    nop
+    nop
+Delay5: ; delay for 12.5 µs
+    nop
+Delay6: ; delay for 10 µs
+    ret
+
+; -------------------------------------------------------------------------
+; Receive up to two bytes over the ADB bus.
+; Params:
+; rb1.R1 - number of bits in the first byte (to ensure the proper sync)
+; rb1.R0 - number of bytes to receive, valid values are 1 and 2
+; Result is returned as follows:
+; one byte  message -> A
+; two bytes message -> A = MSB, rb1.R3 - LSB
+; -------------------------------------------------------------------------
+    org     00600H
+
+ADBRcv:
+    clr     c           ; next bit is assumed to be "0" for now
+
+    ; unrolled loop that waits for the ADB line to go high (timeout after 80 µs)
+    jt1     L0641
+    jt1     L063F
+    jt1     L063D
+    jt1     L063B
+    jt1     L0639
+    jt1     L0637
+    jt1     L0635
+    jt1     L0633
+    jt1     L0631
+    jt1     L062F
+    jt1     L062D
+    jt1     L062B
+    jt1     L0629
+    jt1     L0627
+    jt1     L0625
+    jt1     ADBRcv1
+    jmp     AbortRcv ; timeout reached --> abort the transaction
+
+    ; unrolled loop that waits for the ADB line to go low
+    ; the following jumps are chained together so that the correct bit cell
+    ; timing including the allowed tolerance is obeyed.
+ADBRcv1:
+    jnt1    L066C
+L0625:
+    jnt1    L066C
+L0627:
+    jnt1    L066C
+L0629:
+    jnt1    L066C
+L062B:
+    jnt1    L066C
+L062D:
+    jnt1    L066C
+L062F:
+    jnt1    L066C
+L0631:
+    jnt1    L066C
+L0633:
+    jnt1    L066C
+L0635:
+    jnt1    L066C
+L0637:
+    jnt1    L066C
+L0639:
+    jnt1    L066C
+L063B:
+    jnt1    L066C
+L063D:
+    jnt1    L066C
+L063F:
+    jnt1    L066C
+
+L0641:
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+
+    cpl     c           ; from now on, next bit will be a "1" bit
+
+    ; unrolled loop that waits for the ADB line to go low (timeout after 80 µs)
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jnt1    L066C
+    jmp     AbortRcv    ; timeout reached --> abort the transaction
+
+L066C:
+    rlc     a           ; shift carry (next bit) into the bit position 0 of A
+    djnz    r1,ADBRcv   ; go receive next bit
+    xch     a,r3        ; just received byte goes to rb1.R3, previous one to A
+    djnz    r0,L0673    ; go receive 2nd byte
+    ret
+
+L0673:
+    mov     r1,#008H    ; init bits counter
+
+    clr     c           ; next bit is assumed to be "0" for now
+
+    ; unrolled loop that waits for the ADB line to go high (timeout after 80 µs)
+    jt1     L063D
+    jt1     L063B
+    jt1     L0639
+    jt1     L0637
+    jt1     L0635
+    jt1     L0633
+    jt1     L0631
+    jt1     L062F
+    jt1     L062D
+    jt1     L062B
+    jt1     L0629
+    jt1     L0627
+    jt1     L0625
+    jt1     ADBRcv1
+
+AbortRcv:
+    jmp     AbortXmit
