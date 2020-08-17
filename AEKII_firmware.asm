@@ -157,7 +157,7 @@ L0065:
     xrl     a,#0FFH     ;
     jnz     L006F       ; go if keyscan counter >= 0
     mov     r2,#011H    ; reset keyscan counter when it reaches 0xFF
-    jmp     L0255       ;
+    jmp     L0255       ; go post-process events for the alphanumeric keys
 
 L006F:
     mov     a,r2        ;
@@ -272,6 +272,310 @@ L00C7:
     jnz     L00C3       ; --> re-read and retry
     djnz    r1,L00C7    ; otherwise, continue checking
     ret
+
+; -------------------------------------------------------------------------
+; Scan one column (8 keys).
+; Column number is in rb0.R2:
+; - column number 0x10 corresponds to the modifier keys
+; - column numbers 0x0-0xF correspond to the alphanumeric keys
+; rb0.R4 contains bitmap of key statusses: 0 - pressed, 1 - released
+; -------------------------------------------------------------------------
+    org     00100H
+
+L0100:
+    call    ReadKeys    ; read keys bitmap for the column specified by rb0.R2
+
+L0102:
+    mov     a,r2        ; rb.R0 - address of the memory location of the cached
+    add     a,#06FH     ; keys bitmap for the current column:
+    mov     r0,a        ; rb0.R0 = mem + 0x6F + rb0.R2
+    mov     a,r4        ; get keys bitmap for the current column
+    xch     a,@r0       ; put it to the cache
+    mov     r5,a        ; load previous bitmap to rb0.R5
+    xrl     a,r4        ;
+    jz      L0122       ; jump if recent bitmap = previous bitmap (i.e. no change)
+    anl     a,r5        ; "1" bits in A indicate fresh keypresses
+    jz      L0119       ; go if there is no recent keydown events
+    clr     f0          ; F0 = 0: keypress processing mode
+
+L0110:
+    mov     r3,#008H    ; column bits counter
+
+L0112:
+    rl      a           ; check next bit of the column bitmap
+    jb0     L0125       ; branch if the status of the current key changed
+
+L0115:
+    djnz    r3,L0112    ; otherwise, move to next bit
+    jf0     L0122       ; if in the release mode, we're done
+
+L0119:
+    mov     a,r5        ;
+    xrl     a,r4        ;
+    anl     a,r4        ; "1" bits in A indicate recent key releases
+    jz      L0122       ; if there are no recent key releases we're done
+    clr     f0          ; otherwise, switch to
+    cpl     f0          ; key release processing mode (F0 = 1)
+    jmp     L0110       ; and start over
+
+L0122:
+    jmp     L004D       ; return to main loop
+    nop
+
+L0125:
+    mov     r6,a        ; save A in rb0.R6
+    jf0     L0187       ; branch if we're processing key releases
+    mov     r1,#029H    ;
+    mov     a,@r1       ; get pointer to the output queue's tail
+    xrl     a,#06FH     ;
+    jz      L0182       ; branch if the output queue is full
+    mov     a,r2        ; get current column number
+    xrl     a,#010H     ;
+    jnz     L0171       ; branch if we're processing alphanumeric columns
+
+    ; -----------------------------------------------------------
+    ; Process recent keydown events for modifiers.
+    ; They will be put into the output queue immediatedly.
+    ; -----------------------------------------------------------
+    sel     rb1         ;
+    mov     a,r5        ; A - device handler ID
+    sel     rb0         ;
+    xrl     a,#003H     ;
+    jz      L0164       ; jump if device handler ID = 3
+    mov     a,r3        ;
+    dec     a           ;
+    orl     a,#070H     ; get key code from translation table
+    movp3   a,@a        ; at 0x370
+    mov     r0,a        ; and store it in rb0.R0
+
+    xrl     a,#03AH     ; don't generate keydown event
+    jnz     L014A       ; if both right and left option keys
+    jnt0    L0184       ; are pressed at the same time
+
+L0147:
+    mov     a,r0        ; otherwise, enqueue keydown event
+    jmp     L016D       ; for keycode in rb0.R0
+
+L014A:
+    mov     a,r0        ;
+    xrl     a,#038H     ;
+    jnz     L0158       ; branch if keycode ≠ shift
+    mov     r1,#07FH    ;
+    mov     a,@r1       ; get modifiers status bitmap
+    jb6     L0147       ; don't generate keydown event for shift
+    jb2     L0147       ; if both right and left shift keys
+    jmp     L0184       ; are pressed at the same time
+
+L0158:
+    mov     a,r0        ;
+    xrl     a,#036H     ;
+    jnz     L0147       ; branch if keycode ≠ control
+    in      a,p2        ;
+    jb7     L0147       ; don't generate keydown event for control
+    jb3     L0147       ; if both right and left control keys are pressed
+    jmp     L0184       ; at the same time
+
+    ; ----------------------------------------------
+    ; Process modifiers with device hanlder ID = 3
+    ; ----------------------------------------------
+L0164:
+    mov     a,r3        ;
+    dec     a           ;
+    orl     a,#078H     ; get keycode from translation table
+    movp3   a,@a        ; at 0x378
+    inc     a           ;
+    jz      L0184       ; branch if keycode = 0xFF (unassigned)
+    dec     a           ;
+
+L016D:
+    call    L0773       ; enqueue keydown event for a modifier key in A
+    jmp     L0184       ;
+
+    ; --------------------------------------------------------------
+    ; Process keydown events for alphanumeric keys.
+    ; As opposite to the modifiers, alphanumeric keydown events
+    ; are stored separatedly in another queue (mem_30) for the
+    ; post-processing purpose after all columns were scanned.
+    ; --------------------------------------------------------------
+L0171:
+    mov     r1,#027H    ;
+    mov     a,@r1       ; get alphanumeric queue tail
+    mov     r0,a        ;
+    xrl     a,#04FH     ;
+    jz      L0182       ; branch if the alphanumeric queue is full
+    mov     a,r2        ;
+    swap    a           ; prepare data for the alphanumeric queue:
+    anl     a,#0F0H     ; upper nibble = column number
+    orl     a,r3        ; lower nibble = bit number + 1
+    mov     @r0,a       ; put it into the queue
+    inc     @r1         ; increment alphanumeric queue's tail
+    jmp     L0184       ; continue processing
+
+L0182:
+    call    L0749
+
+L0184:
+    mov     a,r6        ; restore A from R6
+    jmp     L0115       ; continue with the next bit in the key bitmap
+
+L0187:
+
+; ------------------------------------------------------------------------
+; Post-process the alphanumeric key events.
+; The code below will re-scan the keys placed into the alphanumeric queue
+; to see if they are still depressed.
+; The amount of time the key should be down roughly corresponds to 10 ms -
+; that's the time required to scan all 17 columns of keys.
+; If the corresponding key is still depressed, the code will check for
+; ghost keys and, eventually, put the corresponding event into the output
+; queue to be sent to the host computer.
+; Otherwise, the event will be removed from the queue.
+; ------------------------------------------------------------------------
+L0255:
+    mov     r0,#025H    ;
+    mov     a,@r0       ;
+    cpl     a           ;
+    jb0     L025D       ; branch if bit 0 of MEM_25 is cleared
+    jmp     L0318       ;
+
+L025D:
+    mov     r1,#028H    ;
+    mov     a,@r1       ; get head of the alphanumeric queue
+    mov     r0,a        ; store it to rb0.R0
+    mov     r1,#027H    ; get tail of the alphanumeric queue
+    xrl     a,@r1       ;
+    jz      L02C8       ; return to main loop if the alphanumeric queue is empty
+
+L0266:
+    mov     a,@r0       ; get event at queue's head
+    mov     r4,a        ; store it in rb0.R4
+    call    L079F       ; get event's column (R2) and bit number (R3)
+    mov     a,r3        ;
+    mov     r5,a        ; copy bit number to rb0.R5 for the loop at L0271
+    mov     a,r0        ;
+    mov     r6,a        ; rb0.R6 points to the current queue event
+    call    L00BB       ; rescan the same column again
+    mov     a,r4        ; A/rb0.R4 - recent bitmap for the current column
+
+L0271:
+    rrc     a           ; move the re-scanned bit that corresponds to the bit
+    djnz    r5,L0271    ; number of the current event into Carry
+    jnc     L0280       ; if Carry is cleared than the key is still depressed
+
+    mov     a,r6
+    mov     r0,a
+    call    L0759       ; remove the event from the alphanumeric queue
+    call    L0749       ; the key bit of the column bitmap = 1 (key released)
+    mov     a,r6
+    mov     r0,a
+    jmp     L0283
+
+L0280:
+    mov     a,r6        ;
+    mov     r0,a        ;
+    inc     r0          ; move to the next queue event
+
+L0283:
+    mov     r1,#027H    ;
+    mov     a,@r1       ;
+    xrl     a,r0        ;
+    jnz     L0266       ; look up all events in the alphanumeric queue
+
+    mov     r0,#028H    ;
+    mov     a,@r0       ;
+    xrl     a,@r1       ; if there is no events in the alphanumeric queue,
+    jz      L02C8       ; we're done
+
+L028F:
+    mov     r0,#025H
+    mov     a,@r0
+    jb0     L02CC
+    call    L0700
+    jb0     L02CA
+    mov     r1,#028H
+    mov     a,@r1
+    cpl     a
+    inc     a
+    mov     r0,#027H
+    add     a,@r0
+    jc      L02A8
+    mov     a,@r0
+    mov     @r1,a
+    mov     a,#0FFH
+    jmp     L02B6
+
+L02A8:
+    mov     a,@r1
+    mov     r0,a
+    inc     @r1
+    mov     a,@r0
+    mov     r4,a
+    call    L07A0
+    swap    a
+    rr      a
+    orl     a,#080H
+    dec     r3
+    orl     a,r3
+    movp3   a,@a
+
+L02B6:
+    inc     a
+    jz      L02BC
+    dec     a
+    call    L0773
+
+L02BC:
+    mov     r1,#028H
+    mov     a,@r1
+    mov     r0,#027H
+    xrl     a,@r0
+    jnz     L028F
+    mov     r0,#025H
+    mov     @r0,#000H
+
+L02C8:
+    jmp     L004D
+
+L02CA:
+    jmp     L02CE
+
+L02CC:
+    jmp     L0318
+
+L02CE:
+    mov     r0,#028H
+    mov     r1,#025H
+    mov     a,@r1
+    cpl     a
+    jb1     L02D8
+    inc     @r0
+    inc     @r0
+
+L02D8:
+    mov     a,@r0
+    mov     r1,#026H
+    mov     @r1,a
+    mov     r0,a
+    mov     a,@r0
+    mov     r1,#02CH
+    mov     @r1,a
+    inc     r0
+    mov     a,@r0
+    inc     r1
+    mov     @r1,a
+    mov     r0,#027H
+    mov     a,@r0
+    mov     r0,#028H
+    mov     @r0,a
+    mov     r0,#025H
+    mov     a,@r0
+    orl     a,#002H
+    mov     @r0,a
+    jmp     L004D
+
+L02F3: ;-------------- dead code ? -------------------
+    inc     @r0
+    jmp     L02D8
 
 ; -------------------------------------------------------------------------
 ; Lookup table for converting key position (column/row) to scan code.
@@ -526,7 +830,7 @@ L0423:
 L042C:
     mov     r1,#009H    ; number of bits in the 1st ADB byte (including Sync)
     mov     r0,#001H    ; number of bytes to receive
-    call    ADBRcv1     ; receive ADB Command byte to A
+    call    ADBRcv1     ; receive ADB Command byte to rb1.R3
     xrl     a,r3        ; process the received command if device address
     anl     a,#0F0H     ; in the upper nibble of the command byte matches
     jz      HandleCmd   ; our address
@@ -987,7 +1291,7 @@ Delay6: ; delay for 10 µs
 ; rb1.R1 - number of bits in the first byte (to ensure the proper sync)
 ; rb1.R0 - number of bytes to receive, valid values are 1 and 2
 ; Result is returned as follows:
-; one byte  message -> A
+; one byte  message -> rb1.R3
 ; two bytes message -> A = MSB, rb1.R3 - LSB
 ; -------------------------------------------------------------------------
     org     00600H
@@ -1105,3 +1409,48 @@ L0673:
 
 AbortRcv:
     jmp     AbortXmit
+
+; --------------------------------------------------------------------
+; Put the key event in A to output queue.
+; It is located in RAM at 0x4F and contains max. 32 bytes.
+; Variable mem_29 points to the last element of the queue (i.e. tail)
+; --------------------------------------------------------------------
+L0773:
+    sel     rb1         ; select register bank 1
+    mov     r0,a        ; store the event in rb1.R0
+    mov     r1,#029H    ;
+    mov     a,@r1       ; get pointer to the queue's tail
+    xrl     a,#06FH     ;
+    jz      L0785       ; exit if the queue is full
+    mov     a,@r1       ;
+    xch     a,r0        ; put key code in A to the memory
+    mov     @r0,a       ; pointed to by the queue's tail
+    inc     @r1         ; increment tail pointer
+    mov     a,@r1       ; (superfluos instruction)
+    mov     a,r7        ;
+    orl     a,#002H     ; set bit 1 of rb1.R7 indicating "output data is available"
+    mov     r7,a        ; this will be checked by the ADB handling code
+
+L0785:
+    sel     rb0         ; select register bank 0
+    ret                 ; done
+
+; ----------------------------------------------------------------------
+; Unpack column number and bit number from an alphanumeric queue event.
+; rb0.R4 - event to unpack
+; rb0.R2 - column number
+; rb0.R3 - bit number
+; ----------------------------------------------------------------------
+L079F:
+    mov     a,r4
+
+L07A0:
+    anl     a,#00FH     ;
+    mov     r3,a        ; get bit number from the lower nibble
+    mov     a,r4        ;
+    anl     a,#0F0H     ;
+    swap    a           ;
+    mov     r2,a        ; get the column number from the upper nibble
+    ret
+
+; ------------------- COPYRIGHT STRING (omitted) -----------------------
