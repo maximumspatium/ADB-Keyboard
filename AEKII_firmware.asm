@@ -894,60 +894,63 @@ L0459:
 
 ; -------------------------------------------------------------------------
 ; Handler for ADB Talk Reg 0 command.
+; That's where keyboard events are transmitted to the host.
+; Data packets are always two bytes long, the MSB goes first followed by
+; the LSB. If there is only one event, 0xFF will be sent in the 2nd byte.
 ; -------------------------------------------------------------------------
 L045F:
-    mov     a,r7
-    cpl     a
-    jb1     L049E
-    cpl     a
-    anl     a,#0FEH
-    mov     r7,a
-    mov     r3,#0FFH
-    mov     r0,#02AH
-    mov     a,@r0
-    mov     r0,a
-    mov     a,@r0
-    mov     r4,a
-    xrl     a,#07FH
-    anl     a,#07FH
-    jnz     L047C
-    mov     a,@r0
-    orl     a,#07FH
-    mov     r4,a
-    mov     r3,a
-    jmp     L0490
+    mov     a,r7        ;
+    cpl     a           ; check bit 1 of rb1.R7
+    jb1     L049E       ; if it's "0" then there is no outgoing data -> exit
+    cpl     a           ;
+    anl     a,#0FEH     ; clear bit 0 in rb1.R7 -> single-key message
+    mov     r7,a        ;
+    mov     r3,#0FFH    ; set info for the 2nd key to "None"
+    mov     r0,#02AH    ;
+    mov     a,@r0       ;
+    mov     r0,a        ; rb1.R0 points to the head of the output queue
+    mov     a,@r0       ;
+    mov     r4,a        ; grab keyboard event at queue's head
+    xrl     a,#07FH     ;
+    anl     a,#07FH     ; check if the code indicates the Power key
+    jnz     L047C       ; go if it's not the Power key
+    mov     a,@r0       ;
+    orl     a,#07FH     ;
+    mov     r4,a        ; otherwise, generate that special Power (Reset) key
+    mov     r3,a        ; event that contains 0x7F7F code in both key events
+    jmp     L0490       ;
 
 L047C:
-    inc     r0
-    mov     r1,#029H
-    mov     a,@r1
-    xrl     a,r0
-    jz      L0490
-    mov     a,@r0
-    xrl     a,#07FH
-    anl     a,#07FH
-    jz      L0490
-    mov     a,@r0
-    mov     r3,a
-    mov     a,r7
-    orl     a,#001H
-    mov     r7,a
+    inc     r0          ; advance queue's head
+    mov     r1,#029H    ;
+    mov     a,@r1       ; A - output queue's tail
+    xrl     a,r0        ;
+    jz      L0490       ; skip 2nd event if head = tail (no more outgoing data)
+    mov     a,@r0       ;
+    xrl     a,#07FH     ;
+    anl     a,#07FH     ; check for Power/Reset key
+    jz      L0490       ; skip 2nd event generation if its code = Power key
+    mov     a,@r0       ;
+    mov     r3,a        ; copy 2nd event to rb1.R3
+    mov     a,r7        ;
+    orl     a,#001H     ; set bit 0 in rb1.R7 -> two-keys message
+    mov     r7,a        ;
 
 L0490:
-    mov     r1,#006H
-    call    ADBXmit
-    mov     r0,#02AH
-    mov     a,r7
-    cpl     a
-    jb0     L049B
-    inc     @r0
+    mov     r1,#006H    ;
+    call    ADBXmit     ; send two bytes to host
+    mov     r0,#02AH    ; A - address of the head pointer for the output queue
+    mov     a,r7        ;
+    cpl     a           ;
+    jb0     L049B       ; branch if we sent a single key message
+    inc     @r0         ; otherwise, increment queue's head twice
 
 L049B:
-    inc     @r0
-    call    L0787
+    inc     @r0         ; increment queue's head
+    call    L0787       ; reset queue's pointers if empty
 
 L049E:
-    jmp     MainLoop
+    jmp     MainLoop    ; done
 
 ; -------------------------------------------------------------------------
 ; Handler for ADB Talk Reg 2 command.
@@ -1434,6 +1437,33 @@ L0773:
 L0785:
     sel     rb0         ; select register bank 0
     ret                 ; done
+
+; ----------------------------------------------------------------------
+; Reset output queue if it's empty.
+; On return, A contains zero if the output queue is empty.
+; Otherwise, A contains non-zero.
+; ----------------------------------------------------------------------
+L0787:
+    sel     rb1         ; ensure we're using register bank 1
+    mov     r0,#02AH    ; R0 - where queue's head is located
+    mov     r1,#029H    ; R1 - where queue's tail is located
+    mov     a,@r0       ;
+    xrl     a,@r1       ;
+    jnz     L079A       ; branch if there is outgoing data (i.e. head ≠ tail)
+    mov     a,#04FH     ;
+    mov     @r0,a       ; make both head and tail to point to the memory
+    mov     @r1,a       ; location at 0x4F
+    mov     a,r7        ;
+    anl     a,#0FDH     ;
+    mov     r7,a        ; clear bit 1 of rb1.R7 -> no outgoing data
+    clr     a           ;
+    ret                 ; return "False" in A
+
+L079A:
+    mov     a,r7        ;
+    orl     a,#002H     ; set bit 1 of rb1.R7 -> there is outgoing data
+    mov     r7,a        ;
+    ret                 ; return "True" in A
 
 ; ----------------------------------------------------------------------
 ; Unpack column number and bit number from an alphanumeric queue event.
