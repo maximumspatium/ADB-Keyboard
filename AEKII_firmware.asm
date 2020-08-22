@@ -102,7 +102,7 @@ FlushEvents:
     mov     a,#0FFH     ;
     movx    @r0,a       ; configure the bus port for input
 
-    ; initialize memory region 0x2B - 0x7F to 0xFF
+    ; initialize memory region 0x2B - 0x7F with 0xFF
     mov     r1,#055H
 L0044:
     mov     @r0,#0FFH
@@ -396,6 +396,8 @@ L016D:
     ; As opposite to the modifiers, alphanumeric keydown events
     ; are stored separatedly in another queue (mem_30) for the
     ; post-processing purpose after all columns were scanned.
+    ; As long as the alphanumeric queue becomes full, all further
+    ; key presses will be ignored.
     ; --------------------------------------------------------------
 L0171:
     mov     r1,#027H    ;
@@ -412,7 +414,7 @@ L0171:
     jmp     L0184       ; continue processing
 
 L0182:
-    call    L0749
+    call    L0749       ; set the corresponding bitmap bit to "key up"
 
 L0184:
     mov     a,r6        ; restore A from R6
@@ -420,7 +422,7 @@ L0184:
 
 L0187:
 
-; ------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
 ; Post-process the alphanumeric key events.
 ; The code below will re-scan the keys placed into the alphanumeric queue
 ; to see if they are still depressed.
@@ -430,7 +432,12 @@ L0187:
 ; ghost keys and, eventually, put the corresponding event into the output
 ; queue to be sent to the host computer.
 ; Otherwise, the event will be removed from the queue.
-; ------------------------------------------------------------------------
+;
+; FIXME: the code below contains a serious bug: rb0.R2 won't be restored
+; properly when returning to the main loop! That will cause the key scanning
+; loop to continue with the column of the last processed event so that
+; the scanning order will be broken.
+; ---------------------------------------------------------------------------
 L0255:
     mov     r0,#025H    ;
     mov     a,@r0       ;
@@ -462,13 +469,13 @@ L0271:
     djnz    r5,L0271    ; number of the current event into Carry
     jnc     L0280       ; if Carry is cleared than the key is still depressed
 
-    mov     a,r6
-    mov     r0,a
-    call    L0759       ; remove the event from the alphanumeric queue
+    mov     a,r6        ;
+    mov     r0,a        ; rb0.R0 points to the event to be deleted
+    call    L0759       ; delete the event from the alphanumeric queue
     call    L0749       ; the key bit of the column bitmap = 1 (key released)
-    mov     a,r6
-    mov     r0,a
-    jmp     L0283
+    mov     a,r6        ;
+    mov     r0,a        ; R0/R6 points to the current event
+    jmp     L0283       ;
 
 L0280:
     mov     a,r6        ;
@@ -487,11 +494,11 @@ L0283:
     jz      L02C8       ; we're done
 
 L028F:
-    mov     r0,#025H
-    mov     a,@r0
-    jb0     L02CC
-    call    L0700
-    jb0     L02CA
+    mov     r0,#025H    ;
+    mov     a,@r0       ;
+    jb0     L02CC       ; go if ghosting was detected previously
+    call    L0700       ; check for key combinations causing ghosting
+    jb0     L02CA       ; go if ghosting was detected
     mov     r1,#028H
     mov     a,@r1
     cpl     a
@@ -1412,6 +1419,142 @@ L0673:
 
 AbortRcv:
     jmp     AbortXmit
+
+    org     00700H
+
+; ------------------------------------------------------------------------
+; This routine checks for ghosting. The checking condition is as follows:
+; Assume three pressed keys X,Y and Z. The condition is true when X and Y
+; belong to the same column while Y and Z belong to the same row.
+; Bit 0 of MEM_25 will be set if a ghosting combination was detected.
+; Otherwise, it will be cleared.
+; Returns value of MEM_25 in A.
+; ------------------------------------------------------------------------
+L0700:
+    mov     r0,#027H    ;
+    mov     a,@r0       ;
+    mov     r5,a        ; R5 - tail of the alphanumeric queue
+    cpl     a           ;
+    add     a,#031H     ;
+    jc      L073B       ; go if the alphanumeric queue is empty
+    mov     r1,#028H    ;
+    mov     a,@r1       ;
+    mov     r0,a        ;
+    mov     r6,a        ; R0/R6 - head of the alphanumeric queue
+    mov     a,@r0       ;
+    mov     r4,a        ; A/R4 - next event from the alphanumeric queue (X)
+    call    L07A0       ; column number -> R2, bit number -> R3 for event X
+    mov     r1,#030H    ; R1 points to the start of the alphanumeric queue
+
+L0714:
+    mov     a,@r1       ; A - Y event
+    anl     a,#0F0H     ;
+    swap    a           ;
+    xrl     a,r2        ;
+    jnz     L0736       ; go if events X and Y belong to different columns
+    mov     a,r0        ;
+    xrl     a,r1        ;
+    jz      L0736       ; skip processing of the same event
+    mov     a,@r1       ; grab event at Y pointer
+    anl     a,#00FH     ;
+    mov     r4,a        ; R4 - bit number for the Y event
+    mov     r0,#030H    ; R0 points to the start of the alphanumeric queue
+
+L0725:
+    mov     a,@r0       ; grab event Z
+    anl     a,#00FH     ;
+    xrl     a,r4        ;
+    jnz     L072F       ; go if events Y and Z belong to different rows
+    mov     a,r1        ; if event Z ≠ Y,
+    xrl     a,r0        ; then we hit a possible ghosting combination
+    jnz     L0742       ; go and report ghosting
+
+L072F:
+    inc     r0          ; move to next Z event
+    mov     a,r5        ;
+
+L0731:
+    xrl     a,r0        ;
+    jnz     L0725       ; inner loop for checking Z against Y
+    jmp     L073B       ; go report no ghosting
+
+L0736:
+    inc     r1          ; increment Y pointer
+    mov     a,r5        ;
+    xrl     a,r1        ;
+    jnz     L0714       ; loop until Y pointer = queue's tail
+
+L073B:
+    mov     r0,#025H    ;
+    mov     a,@r0       ;
+    anl     a,#0FEH     ; clear bit 0 of MEM_25
+    mov     @r0,a       ;
+    ret                 ;
+
+L0742:
+    mov     r0,#025H    ;
+    mov     a,@r0       ;
+    orl     a,#001H     ; set bit 0 of MEM_25
+    mov     @r0,a       ;
+    ret                 ;
+
+; --------------------------------------------------------------------
+; Set the bitmap bit for the key specified using R2 (column) and
+; R3 (bit) numbers. That indicates that the corresponding key is up.
+; --------------------------------------------------------------------
+L0749:
+    mov     a,r2        ;
+    add     a,#06FH     ;
+    mov     r0,a        ; R0 points to the column bitmap specified in R2
+    mov     a,r3        ;
+    mov     r1,a        ; R1 - bit number for the key specified in R3
+
+L074F:
+    clr     a           ; A = 0
+    clr     c           ;
+    cpl     c           ; C = 1
+
+L0752:
+    rlc     a           ;
+    djnz    r1,L0752    ; A = set_bit(bit_num=R1)
+    orl     a,@r0       ;
+    mov     @r0,a       ; update the column bitmap
+    ret                 ; done
+
+    nop
+
+; -----------------------------------------------------------------------
+; Delete the event pointed to by rb0.R0 from the alphanumeric queue.
+; Deleting an event in the middle will move the all events after it
+; backwards. Trailing entries will be filled with 0xFF (empty).
+; Param: rb0.R0 - address of the current event in the alphanumeric queue
+; -----------------------------------------------------------------------
+L0759:
+    mov     a,r0        ;
+    mov     r1,a        ; rb0.R1 - address of the current event
+    inc     r1          ;
+    mov     a,r1        ;
+    xrl     a,#04FH     ;
+    jnz     L0765       ; jump if that isn't the last element of the queue
+    mov     a,#0FFH     ; otherwise, set the next event to be 0xFF (empty)
+    jmp     L0766       ;
+
+L0765:
+    mov     a,@r1       ; grab next event
+
+L0766:
+    mov     @r0,a       ; store next event at ptr-1
+    inc     r0          ; move to next event in the queue
+    mov     r1,#027H    ;
+    mov     a,@r1       ;
+    xrl     a,r0        ;
+    jnz     L0759       ; continue until head = tail
+    mov     a,@r1       ;
+    dec     a           ;
+    mov     @r1,a       ; decrement queue's tail
+    ret                 ; done
+
+    nop
 
 ; --------------------------------------------------------------------
 ; Put the key event in A to output queue.
