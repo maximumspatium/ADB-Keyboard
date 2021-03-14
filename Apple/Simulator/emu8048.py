@@ -225,6 +225,9 @@ class MSC48_CPU:
         else:
             print("Unsupported port %d" % port)
 
+    def get_pc(self):
+        return self.pc
+
     def get_reg_val(self, reg_num):
         return self.ram_data[self.rb * 24 + reg_num]
 
@@ -377,7 +380,7 @@ class MSC48_CPU:
             self.pc = ret & 0xFFF
         elif opcode == 0x23: # MOV A,imm
             self.cycles += 1 # add extra cycle
-            self.acc = rom_data[self.pc]
+            self.acc = self.rom_data[self.pc]
             self.pc += 1
         elif (opcode & 0xFC) == 0x38: # OUTL port,A
             self.cycles += 1 # add extra cycle

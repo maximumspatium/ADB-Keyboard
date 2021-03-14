@@ -7,6 +7,7 @@
 from argparse import ArgumentParser
 
 from emu8048 import MSC48_CPU
+from dasm8048 import Dasm8048
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -29,18 +30,11 @@ if __name__ == "__main__":
         rom_data = rom_file.read();
         cpu_obj.set_rom_data(rom_data, rom_size)
 
-    #------- DISASSEMBLER TEST --------
-    from dasm8048 import Dasm8048
-
+    # instantiate the disassembler
     dasm = Dasm8048()
-    print(dasm.dasm_single(0, bytes([0xE5,1]))[0])
-    dasm.set_uppercase(True)
-    print(dasm.dasm_single(0, bytes([0xE5,1]))[0])
-    dasm.set_opcode_width(20)
-    print(dasm.dasm_single(0, bytes([0xE5,1]))[0])
-    dasm.set_uppercase(False)
 
-    #----------------------------------
+    print("Welcome to the ADB keyboard simulator.")
+    print("Please enter a command or 'help'.")
 
     cmd = ""
     prev_cmd = ""
@@ -61,6 +55,21 @@ if __name__ == "__main__":
 
         if cmd == "quit":
             pass
+        elif cmd == "dasm":
+            if len(words) == 1:
+                pc = cpu_obj.get_pc()
+                s,l = dasm.dasm_single(pc, bytes([rom_data[pc], rom_data[pc+1]]))
+                print(s)
+            elif len(words) < 3:
+                print("Invalid command syntax")
+                continue
+            else:
+                addr  = int(words[1], 0)
+                count = int(words[2], 0)
+                for i in range(count):
+                    s,l = dasm.dasm_single(addr, bytes([rom_data[addr], rom_data[addr+1]]))
+                    print(s)
+                    addr += l
         elif cmd == "step" or cmd == "si":
             cpu_obj.exec_single()
         elif cmd == "until":
@@ -93,13 +102,16 @@ if __name__ == "__main__":
             print("Sending ADB command 0x%01X" % adb_cmd)
             cpu_obj.adb_send(adb_cmd)
         elif cmd == "help":
-            print("step       - execute single instruction")
-            print("si         - execute single instruction")
-            print("until addr - execute until addr is reached")
-            print("regs       - print internal registers")
-            print("dump       - dump internal memory")
-            print("set X=Y    - change value of register X to Y")
-            print("adb_send X - send byte X over ADB")
-            print("quit       - shut down the simulator")
+            print("step        - execute single instruction")
+            print("si          - execute single instruction")
+            print("until addr  - execute until addr is reached")
+            print("regs        - print internal registers")
+            print("dump        - dump internal memory")
+            print("dasm [A N]] - disassemble N instructions at address A")
+            print("              'dasm' without parameters disassembles one")
+            print("              instruction at PC")
+            print("set X=Y     - change value of register X to Y")
+            print("adb_send X  - send byte X over ADB")
+            print("quit        - shut down the simulator")
         else:
             print("Unknown command: %s" % cmd)
