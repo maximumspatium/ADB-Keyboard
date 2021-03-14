@@ -8,6 +8,7 @@ from argparse import ArgumentParser
 
 from emu8048 import MSC48_CPU
 from dasm8048 import Dasm8048
+from ADB import ADBSim
 
 if __name__ == "__main__":
     parser = ArgumentParser()
@@ -32,6 +33,15 @@ if __name__ == "__main__":
 
     # instantiate the disassembler
     dasm = Dasm8048()
+
+    # instantiate ADB bus simulator
+    adb = ADBSim(cpu_obj)
+    cpu_obj.set_post_instr_cb(adb.adb_transact)
+
+    if rom_size < 2048:
+        adb.set_adb_in_line(cpu_obj.read_port2, 0x80) # AKII
+    else:
+        adb.set_adb_in_line(cpu_obj.read_port1, 0x80) # AEKII
 
     print("Welcome to the ADB keyboard simulator.")
     print("Please enter a command or 'help'.")
@@ -59,7 +69,7 @@ if __name__ == "__main__":
             if len(words) == 1:
                 pc = cpu_obj.get_pc()
                 s,l = dasm.dasm_single(pc, bytes([rom_data[pc], rom_data[pc+1]]))
-                print(s)
+                print(hex(pc).ljust(8), s)
             elif len(words) < 3:
                 print("Invalid command syntax")
                 continue
@@ -68,7 +78,7 @@ if __name__ == "__main__":
                 count = int(words[2], 0)
                 for i in range(count):
                     s,l = dasm.dasm_single(addr, bytes([rom_data[addr], rom_data[addr+1]]))
-                    print(s)
+                    print(hex(addr).ljust(8), s)
                     addr += l
         elif cmd == "step" or cmd == "si":
             cpu_obj.exec_single()
@@ -100,7 +110,7 @@ if __name__ == "__main__":
                 continue
             adb_cmd = int(words[1], 0)
             print("Sending ADB command 0x%01X" % adb_cmd)
-            cpu_obj.adb_send(adb_cmd)
+            adb.adb_send(adb_cmd)
         elif cmd == "help":
             print("step        - execute single instruction")
             print("si          - execute single instruction")

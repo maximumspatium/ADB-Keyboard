@@ -27,7 +27,7 @@ class Dasm8048:
         '''
         self.opc_width = width
 
-    def _fmt_instr(self, opc, ops):
+    def _fmt_instr(self, opc, ops=''):
         if self.uppercase:
             return (opc.ljust(self.opc_width) + ops).upper()
         else:

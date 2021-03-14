@@ -1,4 +1,8 @@
+'''
+    Emulator for an Intel MSC-48 MCU.
 
+    Author: Max Poliakovski 2020-2021
+'''
 
 class MSC48_CPU:
     def __init__(self, rom_size=2048, ram_size=128):
@@ -6,14 +10,15 @@ class MSC48_CPU:
         self.rom_size = rom_size
         self.ram_data = bytearray(ram_size)
         self.ram_size = ram_size
-        self.init_state()
+        self.post_instr_cb = None
+        self.reset()
         self.init_io()
 
     def set_rom_data(self, rom_data, rom_size):
         self.rom_data = rom_data
         self.rom_size = rom_size
 
-    def init_state(self):
+    def reset(self):
         self.pc  = 0  # set program counter to zero
         self.psw = 8  # init PSW, reset stack pointer
         self.rb  = 0  # select register bank O
@@ -34,187 +39,12 @@ class MSC48_CPU:
         self.p2 = 0xFF # FIXME: set port 2 to input mode
 
     def init_io(self):
-        self.t0 = 1 # right option is released
-        self.t1 = 1 # set ADB input high
-        self.adb_state = 0 # no ADB transaction pending
-        self.adb_next_state = 0
-        self.adb_cyc_cnt = 0 # ADB cycles counter
-        self.adb_cmd = 0
-        self.adb_bit = 0
-        self.adb_low_time = 0
-        self.adb_high_time = 0
-        self.adb_phase = 0
-        self.adb_byte = 0
-        self.adb_bit = 0
-        self.adb_bit_pos = 0
-        self.adb_data = bytearray()
+        self.t0 = 1
+        self.t1 = 1
 
-    def adb_send(self, adb_cmd):
-        self.adb_cmd = adb_cmd
-        self.adb_data = bytearray()
-        self.adb_state = 1
-
-    def adb_transact(self):
-        if self.adb_state == 1: # init ADB transaction
-            print("ADB transaction start")
-            self.adb_cyc_cnt = self.cycles
-            self.t1 = 0
-            self.adb_state = 2
-        elif self.adb_state == 2: # generate attention (T1 low for 800 usecs)
-            if (self.cycles - self.adb_cyc_cnt) >= 320:
-                print("ADB attention ended")
-                self.adb_cyc_cnt = self.cycles
-                self.t1 = 1
-                self.adb_state = 3
-        elif self.adb_state == 3: # Sync (T1 high for 70 usecs)
-            if (self.cycles - self.adb_cyc_cnt) >= 28:
-                print("ADB Sync ended")
-                self.adb_bit = 7
-                self.adb_cyc_cnt = self.cycles
-                self.t1 = 0 # each bit cell starts low
-                self.adb_state = 4
-        elif self.adb_state == 4: # send command byte
-            if self.adb_bit >= 0:
-                if (self.cycles - self.adb_cyc_cnt) < 40: # 100 usecs cells
-                    if (self.adb_cmd & (1 << self.adb_bit)): # bit=1
-                        if (self.cycles - self.adb_cyc_cnt) >= 14:
-                            self.t1 = 1 # go high after 35 usecs
-                    else: # bit=0
-                        if (self.cycles - self.adb_cyc_cnt) >= 26:
-                            self.t1 = 1 # go high after 65 usecs
-                else:
-                    print("Sending next ADB bit")
-                    self.t1 = 0 # each bit cell starts low
-                    self.adb_bit -= 1
-                    if self.adb_bit < 0:
-                        print("Sending ADB byte completed")
-                        print("Sending STOP bit")
-                        self.adb_state = 5
-                    self.adb_cyc_cnt = self.cycles
-            else:
-                print("ADB command byte already completed")
-                self.adb_state = 0 # abort transaction
-        elif self.adb_state == 5: # stop bit
-            if (self.cycles - self.adb_cyc_cnt) >= 28:
-                self.t1 = 1 # go high after 70 usecs
-                print("ADB stop bit completed")
-                self.adb_cyc_cnt = self.cycles
-                self.adb_state = 6
-        elif self.adb_state == 6: # Tlt (T1 low for 140 usecs)
-            if self.t1 == 0:
-                print("ADB: looks like we got SRQ!")
-            else:
-                if (self.cycles - self.adb_cyc_cnt) >= 58:
-                    print("ADB: Tlt completed")
-                    self.adb_state = 7
-                    self.adb_cyc_cnt = self.cycles
-        elif self.adb_state == 7: # init data transfer
-            if (self.adb_cmd & 0xC) == 0xC: # ADB Talk
-                self.adb_state = 8
-                self.adb_cyc_cnt = self.cycles
-                print("ADB Talk started")
-            elif (self.adb_cmd & 0xC) == 0x8: # ADB Listen
-                print("ADB Listen not supported yet")
-                self.adb_state = 0
-            else:
-                print("Unsupported ADB command 0x%01X" % self.adb_cmd)
-                self.adb_state = 0
-        elif self.adb_state == 8: # wait for start bit
-            self.t1 = ((self.p1 >> 7) & 1) ^ 1
-            if self.t1:
-                if (self.cycles - self.adb_cyc_cnt) >= 46:
-                    print("ADB Tlt timeout reached")
-                    self.adb_state = 0
-            else:
-                print("Checking ADB start bit")
-                self.adb_state = 9
-                self.adb_next_state = 10
-                self.adb_cyc_cnt = self.cycles
-                self.adb_low_time = 0
-                self.adb_high_time = 0
-                self.adb_phase = 0 # low phase
-        elif self.adb_state == 9: # receive one bit from device
-            self.t1 = ((self.p1 >> 7) & 1) ^ 1 # inverse & copy port1:bit 7 to T1
-            if self.t1 == 0:
-                if self.adb_phase: # high-to-low transition
-                    if (self.cycles - self.adb_cyc_cnt) < 15:
-                        print("ADB timing error, high-to-low too short!")
-                        self.adb_state = 0
-                    else:
-                        self.adb_high_time = (self.cycles - self.adb_cyc_cnt - self.adb_low_time)
-                        # simple heuristic for distinguishing between 0 and 1 bist
-                        # if the low phase is greater than 35 usecs, then assume
-                        # we got a "0" bit, otherwise it's a "1" bit
-                        if self.adb_low_time > 14:
-                            self.adb_bit = 0
-                        else:
-                            self.adb_bit = 1
-                        print("Got %d bit from ADB device" % self.adb_bit)
-                        print("low duration: %f usecs" % (self.adb_low_time * 2.5))
-                        print("high duration: %f usecs" % (self.adb_high_time * 2.5))
-                        self.adb_state = self.adb_next_state
-                        self.adb_cyc_cnt = self.cycles
-                else:
-                    if (self.cycles - self.adb_cyc_cnt) > 52:
-                        print("ADB bit cell timeout 1 (greater than 130 usecs)")
-                        self.adb_state = 0
-                    else:
-                        self.adb_low_time = (self.cycles - self.adb_cyc_cnt)
-            else:
-                if self.adb_phase == 0:
-                    self.adb_low_time = (self.cycles - self.adb_cyc_cnt)
-                    print("ADB line changed from low to high")
-                self.adb_phase = 1
-                self.adb_high_time = (self.cycles - self.adb_cyc_cnt - self.adb_low_time)
-                if (self.cycles - self.adb_cyc_cnt) > 52:
-                    print("ADB bit cell timeout 2 (greater than 130 usecs)")
-                    self.adb_state = 0
-        elif self.adb_state == 10: # check start bit
-            if self.adb_bit == 0:
-                print("Invalid ADB start bit. Aborting...")
-                self.adb_state = 0
-            else:
-                self.adb_state = 9
-                self.adb_next_state = 11
-                self.adb_low_time = 0
-                self.adb_high_time = 0
-                self.adb_phase = 0 # always start with the low phase
-                self.adb_bit_pos = 0
-                self.adb_byte = 0
-        elif self.adb_state == 11: # receive data from device
-            if self.adb_bit_pos < 7:
-                self.adb_byte = (self.adb_byte << 1) | self.adb_bit
-                self.adb_bit_pos += 1
-                self.adb_state = 9
-                self.adb_next_state = 11
-                self.adb_low_time = 0
-                self.adb_high_time = 0
-                self.adb_phase = 0 # always start with the low phase
-            else:
-                self.adb_byte = (self.adb_byte << 1) | self.adb_bit
-                print("Got ADB byte 0x%01X from device" % self.adb_byte)
-                self.adb_data.append(self.adb_byte)
-                if len(self.adb_data) < 2:
-                    self.adb_state = 9
-                    self.adb_next_state = 11
-                    self.adb_low_time = 0
-                    self.adb_high_time = 0
-                    self.adb_phase = 0 # always start with the low phase
-                    self.adb_bit_pos = 0
-                    self.adb_byte = 0
-                else: # go receive stop bit
-                    self.adb_state = 9
-                    self.adb_next_state = 12
-                    self.adb_cyc_cnt = self.cycles
-                    self.adb_low_time = 0
-                    self.adb_high_time = 0
-                    self.adb_phase = 0 # always start with the low phase
-        elif self.adb_state == 12:
-            if self.adb_bit == 0:
-                print("Received ADB stop bit. Stopping...")
-            else:
-                print("Invalid ADB stop bit. Stopping...")
-            self.adb_state = 0
+    def set_post_instr_cb(self, cb):
+        ''' Set post-instruction callback '''
+        self.post_instr_cb = cb
 
     def write_port(self, port, val):
         print("Port %d state changed to 0x%01X" % (port, val))
@@ -224,6 +54,18 @@ class MSC48_CPU:
             self.p2 = val
         else:
             print("Unsupported port %d" % port)
+
+    def get_t1_line(self):
+        return self.t1
+
+    def set_t1_line(self, val):
+        self.t1 = val & 1
+
+    def read_port1(self):
+        return self.p1
+
+    def read_port2(self):
+        return self.p2
 
     def get_pc(self):
         return self.pc
@@ -446,13 +288,13 @@ class MSC48_CPU:
             self.cycles += 1 # add extra cycle
             self.cond_jump(self.t0)
         elif opcode == 0x46: # JNT1 addr
-            if self.adb_state:
-                self.adb_transact()
+            #if self.adb_state:
+            #    self.adb_transact()
             self.cycles += 1 # add extra cycle
             self.cond_jump(self.t1 ^ 1)
         elif opcode == 0x56: # JT1 addr
-            if self.adb_state:
-                self.adb_transact()
+            #if self.adb_state:
+            #    self.adb_transact()
             self.cycles += 1 # add extra cycle
             self.cond_jump(self.t1)
         elif opcode == 0x76: # JF1 addr
@@ -577,6 +419,5 @@ class MSC48_CPU:
         else:
             print("Unknown opcode 0x%01X at 0x%03X" % (opcode, self.pc - 1))
 
-        # update ADB state machine
-        if self.adb_state:
-            self.adb_transact()
+        if self.post_instr_cb:
+            self.post_instr_cb(self.cycles)
